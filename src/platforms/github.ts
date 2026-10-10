@@ -22,7 +22,7 @@ export const GITHUB_APP_INSTALLATION_PERMISSIONS = {
   secrets: "write",
 } as const;
 
-const GITHUB_MCP_VERSION = "1.14.0";
+const GITHUB_MCP_VERSION = "2.0.2";
 const GITHUB_MCP_TOOLSETS = "repos,issues,pull_requests,actions";
 
 type GitHubAppInstallationAuthentication = {
