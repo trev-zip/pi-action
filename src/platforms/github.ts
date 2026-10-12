@@ -10,9 +10,10 @@ import type {
   PlatformClient,
   PlatformMcp,
   PullRequestPayload,
+  PullRequestReview,
 } from "../types.ts";
 import { errorMessage } from "../utils.ts";
-import { getPullRequestNumber } from "./context.ts";
+import { getPullRequestHeadSha, getPullRequestNumber } from "./context.ts";
 
 export const GITHUB_APP_INSTALLATION_PERMISSIONS = {
   actions: "read",
@@ -20,6 +21,12 @@ export const GITHUB_APP_INSTALLATION_PERMISSIONS = {
   issues: "write",
   pull_requests: "write",
   secrets: "write",
+} as const;
+
+const REVIEW_EVENTS = {
+  comment: "COMMENT",
+  request_changes: "REQUEST_CHANGES",
+  approve: "APPROVE",
 } as const;
 
 const GITHUB_MCP_VERSION = "2.0.2";
@@ -113,6 +120,34 @@ export class GitHubPlatformClient implements PlatformClient {
     });
 
     core.info("Posted pi pull request comment");
+  }
+
+  async listPullRequestFiles(): Promise<string[]> {
+    const files = await this.octokit.paginate(this.octokit.rest.pulls.listFiles, {
+      ...github.context.repo,
+      pull_number: getPullRequestNumber(),
+      per_page: 100,
+    });
+
+    return files.map((file) => file.filename);
+  }
+
+  async createPullRequestReview(review: PullRequestReview): Promise<void> {
+    await this.octokit.rest.pulls.createReview({
+      ...github.context.repo,
+      pull_number: getPullRequestNumber(),
+      commit_id: getPullRequestHeadSha(),
+      event: REVIEW_EVENTS[review.event],
+      body: review.body,
+      comments: review.comments.map((comment) => ({
+        path: comment.path,
+        line: comment.line,
+        side: "RIGHT",
+        body: comment.body,
+      })),
+    });
+
+    core.info("Posted pi pull request review");
   }
 
   async setPullRequestAutomerge(enabled: boolean): Promise<void> {

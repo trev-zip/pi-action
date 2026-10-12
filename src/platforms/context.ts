@@ -13,6 +13,12 @@ export function getPullRequestNumber(): number {
   return issueNumber;
 }
 
+// Pins review comments to the commit pi reviewed, even if the pull request
+// moves on while the run is in progress.
+export function getPullRequestHeadSha(): string | undefined {
+  return (github.context.payload as PullRequestPayload).pull_request?.head?.sha || undefined;
+}
+
 export function getServerUrl(): string {
   return process.env.GITHUB_SERVER_URL || github.context.serverUrl;
 }

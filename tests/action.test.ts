@@ -11,6 +11,7 @@ import {
   parseExcludeTools,
   parseOptionalBoolean,
   parseOptionalString,
+  parseReviewLevel,
   parseThinkingLevel,
   readInputs,
   resolvePromptInput,
@@ -55,6 +56,7 @@ import {
   EXCLUDE_TOOLS_ENV,
   FILE_ROOT_ENV,
   PI_ACTION_EXTENSION,
+  REVIEW_EVENTS_ENV,
   SECRET_ENV_ENV,
   SUBMIT_RESULT_TOOL,
 } from "../src/pi/extension.ts";
@@ -77,7 +79,14 @@ import {
   isGitHubAppInstallationUserError,
   normalizePrivateKey,
 } from "../src/platforms/index.ts";
+import {
+  appendReviewComments,
+  getReviewEvents,
+  postPullRequestReview,
+  resolvePullRequestReview,
+} from "../src/review.ts";
 import { getToolArchiveCacheKey, getToolArchiveCachePaths } from "../src/tool-archive.ts";
+import type { PlatformClient, PullRequestReview } from "../src/types.ts";
 
 describe("inputs", () => {
   test("validates auth secret names", () => {
@@ -138,6 +147,13 @@ describe("inputs", () => {
     expect(() => parseExcludeTools("bash,submit_result")).toThrow(/submit_result/);
     expect(() => parseExcludeTools("ba*")).toThrow(/exact tool names; "ba\*"/);
     expect(() => parseExcludeTools("read,*")).toThrow(/exact tool names/);
+  });
+
+  test("parses review levels", () => {
+    expect(parseReviewLevel("")).toBeUndefined();
+    expect(parseReviewLevel(" Request-Changes ")).toBe("request-changes");
+    expect(parseReviewLevel("approve")).toBe("approve");
+    expect(() => parseReviewLevel("request_changes")).toThrow(/review must be one of/);
   });
 
   test("parses optional string inputs", () => {
@@ -608,8 +624,55 @@ describe("pi runner", () => {
       commitMessage: "Update docs",
       prComment: "Looks good",
       failReason: "Found 2 issues",
+      reviewEvent: undefined,
+      reviewComments: [],
       model: "gpt-6-luna",
     });
+  });
+
+  test("reads the submitted review from JSON events", () => {
+    const state = createPiStreamState();
+
+    handlePiOutputLine(
+      JSON.stringify({
+        type: "tool_execution_end",
+        toolName: SUBMIT_RESULT_TOOL,
+        result: {
+          details: {
+            commit_message: "",
+            pr_comment: "",
+            fail_reason: "",
+            review_event: "request_changes",
+            review_comments: [
+              { path: "./src/git.ts", line: 12, body: " Leaks the token. " },
+              { path: "src/git.ts", line: 0, body: "Not a line" },
+              { path: "", line: 3, body: "No path" },
+              { path: "src/git.ts", line: 4, body: "" },
+              "not a comment",
+            ],
+          },
+        },
+        isError: false,
+      }),
+      state,
+    );
+
+    expect(state.result).toMatchObject({
+      reviewEvent: "request_changes",
+      reviewComments: [{ path: "src/git.ts", line: 12, body: "Leaks the token." }],
+    });
+
+    handlePiOutputLine(
+      JSON.stringify({
+        type: "tool_execution_end",
+        toolName: SUBMIT_RESULT_TOOL,
+        result: { details: { review_event: "merge", review_comments: "none" } },
+        isError: false,
+      }),
+      state,
+    );
+
+    expect(state.result).toMatchObject({ reviewEvent: undefined, reviewComments: [] });
   });
 
   test("ignores failed submit_result calls", () => {
@@ -794,9 +857,40 @@ describe("pi prompt", () => {
     expect(prompt).toContain("set pr_comment to concise Markdown");
   });
 
+  test("asks for a review when reviews are enabled", () => {
+    const pullRequestContext = {
+      repository: "llc/pi-action",
+      serverUrl: "https://trev.zip",
+      eventName: "pull_request",
+      ref: "refs/pull/20/merge",
+      sha: "merge",
+      pullRequest: { number: 20, headSha: "7484e72", baseRef: "main" },
+    };
+    const prompt = buildPrompt("Review this pull request.", pullRequestContext, [
+      "comment",
+      "request_changes",
+    ]);
+
+    expect(prompt).toContain("posted as a pull request review");
+    expect(prompt).toContain('review_event to one of "comment", "request_changes".');
+    expect(prompt).toContain("review_comments");
+    expect(prompt).not.toContain("set pr_comment to concise Markdown. Otherwise");
+
+    const pushPrompt = buildPrompt(
+      "Review this pull request.",
+      { ...pullRequestContext, pullRequest: undefined },
+      ["comment"],
+    );
+    expect(pushPrompt).toContain("not a pull request");
+    expect(pushPrompt).not.toContain("review_event");
+  });
+
   test("formats pull request comments with the agent and model", () => {
     expect(formatPiPullRequestComment(" Done. \n", "openai/<model>")).toBe(
       `Done.\n\n---\n\nagent: pi ${PI_VERSION} | model: <code>openai/&lt;model&gt;</code>`,
+    );
+    expect(formatPiPullRequestComment("", "gpt-6-luna")).toBe(
+      `agent: pi ${PI_VERSION} | model: <code>gpt-6-luna</code>`,
     );
   });
 
@@ -827,7 +921,7 @@ describe("pi prompt", () => {
       "@earendil-works/pi-coding-agent",
       'export const createBashToolDefinition = (cwd, options) => ({ name: "bash", options });',
     );
-    writeStubModule(dir, "typebox", "export const Type = { Object: (v) => v, String: (v) => v };");
+    writeStubModule(dir, "typebox", TYPEBOX_STUB);
     Object.assign(process.env, env);
 
     try {
@@ -892,6 +986,46 @@ describe("pi prompt", () => {
   test("registers the submit_result tool in the extension", () => {
     expect(PI_ACTION_EXTENSION).toContain(`name: "${SUBMIT_RESULT_TOOL}"`);
     expect(PI_ACTION_EXTENSION).toContain("terminate: true");
+  });
+
+  test("adds review parameters to submit_result only when reviews are enabled", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "pi-action-extension-"));
+
+    writeFileSync(path.join(dir, "extension.mjs"), PI_ACTION_EXTENSION);
+    writeStubModule(
+      dir,
+      "@earendil-works/pi-coding-agent",
+      'export const createBashToolDefinition = () => ({ name: "bash" });',
+    );
+    writeStubModule(dir, "typebox", TYPEBOX_STUB);
+
+    try {
+      const extension = await import(path.join(dir, "extension.mjs"));
+      const loadParameters = () => {
+        const tools: { name: string; parameters: Record<string, unknown> }[] = [];
+        extension.default({
+          registerTool: (tool: (typeof tools)[number]) => tools.push(tool),
+          on: () => {},
+          getActiveTools: () => [],
+        });
+        return tools.find((tool) => tool.name === SUBMIT_RESULT_TOOL)?.parameters;
+      };
+
+      expect(Object.keys(loadParameters() ?? {})).toEqual([
+        "commit_message",
+        "pr_comment",
+        "fail_reason",
+      ]);
+
+      process.env[REVIEW_EVENTS_ENV] = "comment,request_changes";
+      expect(loadParameters()).toMatchObject({
+        review_event: { anyOf: [{ const: "comment" }, { const: "request_changes" }] },
+        review_comments: { items: { path: {}, line: { minimum: 1 }, body: {} } },
+      });
+    } finally {
+      delete process.env[REVIEW_EVENTS_ENV];
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -1139,6 +1273,105 @@ describe("platforms", () => {
   });
 });
 
+describe("review", () => {
+  const comment = { path: "src/git.ts", line: 12, body: "Leaks the token." };
+
+  test("maps review levels to the review states pi may submit", () => {
+    expect(getReviewEvents("comment")).toEqual(["comment"]);
+    expect(getReviewEvents("request-changes")).toEqual(["comment", "request_changes"]);
+    expect(getReviewEvents("approve")).toEqual(["comment", "request_changes", "approve"]);
+  });
+
+  test("resolves the review pi submitted", () => {
+    const resolve = (
+      reviewEvent: PullRequestReview["event"] | undefined,
+      level: Parameters<typeof resolvePullRequestReview>[1],
+      body: string,
+      failed = false,
+      reviewComments = [comment],
+    ) => resolvePullRequestReview({ reviewEvent, reviewComments }, level, body, failed);
+
+    expect(resolve("request_changes", "approve", " Found one issue. ")).toEqual({
+      event: "request_changes",
+      body: "Found one issue.",
+      comments: [comment],
+    });
+    expect(resolve(undefined, "approve", "Notes")?.event).toBe("comment");
+    expect(resolve("approve", "request-changes", "LGTM")?.event).toBe("comment");
+    expect(resolve("request_changes", "comment", "Found one issue.")?.event).toBe("comment");
+    expect(resolve("approve", "approve", "LGTM", true)?.event).toBe("comment");
+    expect(resolve("approve", "approve", "", false, [])).toEqual({
+      event: "approve",
+      body: "",
+      comments: [],
+    });
+    expect(resolve("comment", "approve", " ", false, [])).toBeUndefined();
+  });
+
+  test("lists inline comments in the review body", () => {
+    expect(appendReviewComments("Summary", [])).toBe("Summary");
+    expect(
+      appendReviewComments("Summary", [comment, { path: "a.ts", line: 1, body: "One\nTwo" }]),
+    ).toBe("Summary\n\n- `src/git.ts:12`: Leaks the token.\n- `a.ts:1`: One\n  Two");
+    expect(appendReviewComments("", [comment])).toBe("- `src/git.ts:12`: Leaks the token.");
+  });
+
+  test("posts reviews with inline comments on changed files", async () => {
+    const outside = { path: "README.md", line: 3, body: "Outdated." };
+    const { client, reviews } = createReviewClient(["src/git.ts"]);
+
+    await postPullRequestReview(
+      client,
+      { event: "request_changes", body: "Summary", comments: [comment, outside] },
+      (body) => `${body}|footer`,
+    );
+
+    expect(reviews).toEqual([
+      {
+        event: "request_changes",
+        body: "Summary\n\n- `README.md:3`: Outdated.|footer",
+        comments: [comment],
+      },
+    ]);
+  });
+
+  test("retries rejected reviews as comment reviews without inline comments", async () => {
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const { client, reviews } = createReviewClient(["src/git.ts"], 1);
+
+    try {
+      await postPullRequestReview(
+        client,
+        { event: "approve", body: "", comments: [comment] },
+        (body) => `${body}|footer`,
+      );
+    } finally {
+      write.mockRestore();
+    }
+
+    expect(reviews).toEqual([
+      { event: "comment", body: "- `src/git.ts:12`: Leaks the token.|footer", comments: [] },
+    ]);
+  });
+
+  test("keeps inline comments when pull request files cannot be listed", async () => {
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const { client, reviews } = createReviewClient(undefined);
+
+    try {
+      await postPullRequestReview(
+        client,
+        { event: "comment", body: "Summary", comments: [comment] },
+        (body) => body,
+      );
+    } finally {
+      write.mockRestore();
+    }
+
+    expect(reviews).toEqual([{ event: "comment", body: "Summary", comments: [comment] }]);
+  });
+});
+
 describe("git", () => {
   test("builds authenticated push URLs", () => {
     expect(
@@ -1230,4 +1463,37 @@ function writeStubModule(dir: string, name: string, source: string): void {
     JSON.stringify({ name, type: "module", main: "index.js" }),
   );
   writeFileSync(path.join(moduleDir, "index.js"), source);
+}
+
+const TYPEBOX_STUB = `export const Type = {
+  Object: (v) => v,
+  String: (v) => v,
+  Integer: (v) => v,
+  Literal: (v) => ({ const: v }),
+  Union: (v, options) => ({ anyOf: v, ...options }),
+  Array: (v, options) => ({ items: v, ...options }),
+};`;
+
+// Records posted reviews, rejecting the first `failures` attempts.
+function createReviewClient(files: string[] | undefined, failures = 0) {
+  const reviews: PullRequestReview[] = [];
+  let attempts = 0;
+  const client = {
+    listPullRequestFiles: async () => {
+      if (!files) {
+        throw new Error("HTTP 404");
+      }
+
+      return files;
+    },
+    createPullRequestReview: async (review: PullRequestReview) => {
+      if (attempts++ < failures) {
+        throw new Error("HTTP 422");
+      }
+
+      reviews.push(review);
+    },
+  } as unknown as PlatformClient;
+
+  return { client, reviews };
 }

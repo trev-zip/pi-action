@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process";
 
-import type { PiRunMetadata } from "../types.ts";
+import type { PiRunMetadata, ReviewComment, ReviewEvent } from "../types.ts";
 import { DEFAULT_CUSTOM_PROVIDER } from "./config.ts";
 import { createPiEnv } from "./env.ts";
-import { SUBMIT_RESULT_TOOL } from "./extension.ts";
+import { REVIEW_EVENTS_ENV, SUBMIT_RESULT_TOOL } from "./extension.ts";
 import { formatInlineLogText, logPiBlock, logPiLine, logPiText } from "./logging.ts";
 import { buildPrompt } from "./prompt.ts";
 
@@ -17,6 +17,8 @@ export type PiRunOptions = {
   model: string | undefined;
   thinking: string | undefined;
   excludeTools?: string[];
+  // Review states pi may submit; pi submits no review when empty.
+  reviewEvents?: ReviewEvent[];
   env?: Record<string, string>;
 };
 
@@ -43,19 +45,23 @@ type PiEvent = {
 
 export type PiStreamState = {
   lastAssistant: PiAssistantMessage | undefined;
-  result: { commitMessage: string; prComment: string; failReason: string } | undefined;
+  result: Omit<PiRunMetadata, "model"> | undefined;
 };
+
+const REVIEW_EVENTS: ReviewEvent[] = ["comment", "request_changes", "approve"];
 
 export function createPiStreamState(): PiStreamState {
   return { lastAssistant: undefined, result: undefined };
 }
 
 export async function runPiPrompt(options: PiRunOptions): Promise<PiRunMetadata> {
-  const piPrompt = buildPrompt(options.prompt);
+  const reviewEvents = options.reviewEvents ?? [];
+  const piPrompt = buildPrompt(options.prompt, undefined, reviewEvents);
   logPiText("pi prompt", piPrompt);
 
   const state = createPiStreamState();
-  const exitCode = await spawnPi(buildPiArgs(options), options, piPrompt, (line) =>
+  const env = { ...options.env, [REVIEW_EVENTS_ENV]: reviewEvents.join(",") };
+  const exitCode = await spawnPi(buildPiArgs(options), { ...options, env }, piPrompt, (line) =>
     handlePiOutputLine(line, state),
   );
 
@@ -205,9 +211,34 @@ function handlePiToolEnd(event: PiEvent, state: PiStreamState): void {
       commitMessage: asString(details.commit_message).trim(),
       prComment: asString(details.pr_comment).trim(),
       failReason: asString(details.fail_reason).trim(),
+      reviewEvent: parseReviewEvent(details.review_event),
+      reviewComments: parseReviewComments(details.review_comments),
     };
     logPiLine("agent", "submitted result");
   }
+}
+
+function parseReviewEvent(value: unknown): ReviewEvent | undefined {
+  return REVIEW_EVENTS.find((event) => event === value);
+}
+
+// pi validates tool arguments against the schema, so this only drops comments
+// that could not be posted anyway.
+function parseReviewComments(value: unknown): ReviewComment[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((item) => {
+    const comment = asRecord(item);
+    const filePath = asString(comment.path).trim().replace(/^\.\//, "");
+    const body = asString(comment.body).trim();
+    const line = comment.line;
+
+    return filePath && body && Number.isInteger(line) && (line as number) > 0
+      ? [{ path: filePath, line: line as number, body }]
+      : [];
+  });
 }
 
 function logPiAssistantMessageEvent(value: unknown): void {

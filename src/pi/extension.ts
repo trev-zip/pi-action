@@ -6,6 +6,7 @@ export const MCP_CONFIG_ENV = "PI_ACTION_MCP_CONFIG";
 export const SECRET_ENV_ENV = "PI_ACTION_SECRET_ENV";
 export const FILE_ROOT_ENV = "PI_ACTION_FILE_ROOT";
 export const EXCLUDE_TOOLS_ENV = "PI_ACTION_EXCLUDE_TOOLS";
+export const REVIEW_EVENTS_ENV = "PI_ACTION_REVIEW_EVENTS";
 export const MCP_PROTOCOL_VERSION = "2025-06-18";
 
 // pi has no structured output mode, so the action registers a tool that the
@@ -26,6 +27,7 @@ const MCP_CONFIG_ENV = "${MCP_CONFIG_ENV}";
 const SECRET_ENV_ENV = "${SECRET_ENV_ENV}";
 const FILE_ROOT_ENV = "${FILE_ROOT_ENV}";
 const EXCLUDE_TOOLS_ENV = "${EXCLUDE_TOOLS_ENV}";
+const REVIEW_EVENTS_ENV = "${REVIEW_EVENTS_ENV}";
 const FILE_TOOLS = ["read", "grep", "find", "ls", "edit", "write"];
 const SHELL_TOOLS = ["bash", "powershell"];
 const MCP_PROTOCOL_VERSION = "${MCP_PROTOCOL_VERSION}";
@@ -33,6 +35,35 @@ const MCP_REQUEST_TIMEOUT_MS = 60000;
 const MCP_RESULT_MAX_CHARS = 100000;
 
 export default function (pi) {
+  // The review fields only exist when the run submits a pull request review,
+  // and only offer the review states the review input allows.
+  const reviewEvents = (process.env[REVIEW_EVENTS_ENV] ?? "").split(",").filter(Boolean);
+  const reviewParameters =
+    reviewEvents.length > 0
+      ? {
+          review_event: Type.Union(
+            reviewEvents.map((event) => Type.Literal(event)),
+            { description: "State of the pull request review that pr_comment is posted as." },
+          ),
+          review_comments: Type.Array(
+            Type.Object({
+              path: Type.String({
+                description: "Path of a file changed by the pull request, relative to the repository root.",
+              }),
+              line: Type.Integer({
+                minimum: 1,
+                description: "Line number in the pull request's version of the file.",
+              }),
+              body: Type.String({ description: "Review comment for this line in Markdown." }),
+            }),
+            {
+              description:
+                "Inline review comments on lines the pull request adds or changes, or an empty array.",
+            },
+          ),
+        }
+      : {};
+
   pi.registerTool({
     name: "${SUBMIT_RESULT_TOOL}",
     label: "Submit result",
@@ -55,6 +86,7 @@ export default function (pi) {
         description:
           "Short reason to fail the workflow run when the task asks for it, or an empty string otherwise.",
       }),
+      ...reviewParameters,
     }),
     async execute(_toolCallId, params) {
       return {

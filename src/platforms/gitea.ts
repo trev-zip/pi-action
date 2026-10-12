@@ -7,9 +7,10 @@ import type {
   McpReleaseAsset,
   PlatformClient,
   PlatformMcp,
+  PullRequestReview,
 } from "../types.ts";
 import { errorMessage } from "../utils.ts";
-import { getPullRequestNumber, getServerUrl } from "./context.ts";
+import { getPullRequestHeadSha, getPullRequestNumber, getServerUrl } from "./context.ts";
 
 const GITEA_MCP_VERSION = "1.8.1";
 
@@ -33,6 +34,14 @@ const GITEA_MCP_TOOLS = [
   "list_pull_requests",
   "actions_run_read",
 ];
+
+const PULL_REQUEST_FILE_PAGES = 100;
+
+const REVIEW_EVENTS = {
+  comment: "COMMENT",
+  request_changes: "REQUEST_CHANGES",
+  approve: "APPROVED",
+} as const;
 
 class HttpError extends Error {
   status: number;
@@ -107,6 +116,51 @@ export class GiteaPlatformClient implements PlatformClient {
     );
 
     core.info("Posted pi pull request comment");
+  }
+
+  async listPullRequestFiles(): Promise<string[]> {
+    const { owner, repo } = github.context.repo;
+    const route = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${getPullRequestNumber()}/files`;
+    const files: string[] = [];
+
+    // The server caps the page size, so read pages until one comes back empty.
+    for (let page = 1; page <= PULL_REQUEST_FILE_PAGES; page++) {
+      const response = await giteaRequest<{ filename?: string }[]>(
+        "GET",
+        `${route}?page=${page}&limit=50`,
+        this.token,
+      );
+
+      if (response.length === 0) {
+        break;
+      }
+
+      files.push(...response.flatMap((file) => (file.filename ? [file.filename] : [])));
+    }
+
+    return files;
+  }
+
+  async createPullRequestReview(review: PullRequestReview): Promise<void> {
+    const { owner, repo } = github.context.repo;
+    await giteaRequest(
+      "POST",
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${getPullRequestNumber()}/reviews`,
+      this.token,
+      {
+        event: REVIEW_EVENTS[review.event],
+        body: review.body,
+        commit_id: getPullRequestHeadSha(),
+        // new_position is the line number in the new version of the file.
+        comments: review.comments.map((comment) => ({
+          path: comment.path,
+          body: comment.body,
+          new_position: comment.line,
+        })),
+      },
+    );
+
+    core.info("Posted pi pull request review");
   }
 
   async setPullRequestAutomerge(enabled: boolean): Promise<void> {

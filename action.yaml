@@ -52,6 +52,9 @@ inputs:
   automerge:
     description: Set true to enable automerge, false to disable automerge, or omit for no-op
     required: false
+  review:
+    description: Post pi's pull request result as a review instead of a comment, allowing at most this review state (comment, request-changes, or approve)
+    required: false
   push:
     description: Set false to commit local changes without pushing them
     required: false

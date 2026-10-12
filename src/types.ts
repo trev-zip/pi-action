@@ -42,6 +42,7 @@ export type ActionInputs = {
   githubAppClientId: string | undefined;
   githubAppPrivateKey: string | undefined;
   automerge: boolean | undefined;
+  review: ReviewLevel | undefined;
   push: boolean;
   comment: boolean;
   dryRun: boolean;
@@ -59,14 +60,35 @@ export type PlatformClient = {
   mcp: PlatformMcp;
   getActionUser(): Promise<ActionUser>;
   postPullRequestComment(body: string): Promise<void>;
+  listPullRequestFiles(): Promise<string[]>;
+  createPullRequestReview(review: PullRequestReview): Promise<void>;
   setPullRequestAutomerge(enabled: boolean): Promise<void>;
   updateRepositoryAuthSecret(secretName: string, value: string): Promise<void>;
+};
+
+// The strongest review state pi may submit, from the review input.
+export type ReviewLevel = "comment" | "request-changes" | "approve";
+
+export type ReviewEvent = "comment" | "request_changes" | "approve";
+
+export type ReviewComment = {
+  path: string;
+  line: number;
+  body: string;
+};
+
+export type PullRequestReview = {
+  event: ReviewEvent;
+  body: string;
+  comments: ReviewComment[];
 };
 
 export type PiRunMetadata = {
   commitMessage: string;
   prComment: string;
   failReason: string;
+  reviewEvent: ReviewEvent | undefined;
+  reviewComments: ReviewComment[];
   model: string | undefined;
 };
 

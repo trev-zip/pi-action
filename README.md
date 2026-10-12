@@ -225,9 +225,10 @@ secret.
 
 ### Pull Requests
 
-On pull request events, pi can leave a PR comment and optionally toggle
-automerge. Non-empty comments include a footer identifying pi and the model used
-for the run. When pi fails the run, the action skips enabling automerge.
+On pull request events, pi can leave a PR comment or a
+[review](#pull-request-reviews), and optionally toggle automerge. Non-empty
+comments and reviews include a footer identifying pi and the model used for the
+run. When pi fails the run, the action skips enabling automerge.
 
 ```yaml
 name: pi-pr
@@ -252,6 +253,65 @@ jobs:
           automerge: true
           prompt: Review this pull request and fix straightforward issues.
 ```
+
+### Pull Request Reviews
+
+Set `review` to post pi's result as a pull request review instead of a comment.
+pi's comment becomes the review body, and pi can attach inline comments to lines
+the pull request adds or changes. `review` sets the strongest state pi may
+choose:
+
+- `comment`: comment reviews only.
+- `request-changes`: comment, or request changes.
+- `approve`: comment, request changes, or approve.
+
+The action posts the review, so pi still has no MCP write tools. When pi fails
+the run, an approval is posted as a comment review instead. Inline comments on
+files the pull request does not change are listed in the review body. If the
+platform rejects the review, for example because an inline comment is outside
+the diff or because the token's user opened the pull request and cannot approve
+or request changes on it, the action posts a comment review with every inline
+comment listed in the body. `comment: false` and `dry-run: true` skip the
+review.
+
+To review when someone requests a review from the token's user, trigger on
+`review_requested` and check the requested reviewer. Re-requesting the review
+runs it again. Reviews can only be requested from users with access to the
+repository, so the token must belong to a user rather than an automatic token
+or GitHub App.
+
+```yaml
+name: pi-review
+
+on:
+  pull_request:
+    types: [review_requested]
+
+jobs:
+  review:
+    if: github.event.requested_reviewer.login == 'pi-bot'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: trev-zip/pi-action@main
+        with:
+          base-url: ${{ secrets.CLIPROXY_URL }}
+          api-key: ${{ secrets.CLIPROXY_API_KEY }}
+          model: claude-sonnet-5
+          token: ${{ secrets.PI_BOT_TOKEN }}
+          exclude-tools: bash,edit,write
+          push: false
+          review: request-changes
+          prompt: Review this pull request. Request changes if you find any problems.
+```
+
+Allow `approve` only when an approval from pi should carry weight. A prompt
+injection in the pull request could talk pi into approving it, and the approval
+counts toward required approvals if branch protection accepts reviews from the
+token's user.
 
 ### Untrusted Input
 
@@ -303,6 +363,7 @@ those tools run, cached like the pi and MCP binaries.
 | `client-id`     | GitHub App client ID, used with `private-key` instead of `token`                |
 | `private-key`   | GitHub App private key                                                          |
 | `automerge`     | `true` to enable automerge, `false` to disable it, or omit for no change        |
+| `review`        | Post a review instead of a comment: `comment`, `request-changes`, or `approve`  |
 | `push`          | `false` to commit locally without pushing (default `true`)                      |
 | `comment`       | `false` to skip posting the pull request comment (default `true`)               |
 | `dry-run`       | Commit locally but skip pushes, comments, and automerge (default `false`)       |

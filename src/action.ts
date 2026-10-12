@@ -13,6 +13,7 @@ import { formatPiPullRequestComment } from "./pi/prompt.ts";
 import { runPiPrompt } from "./pi/runner.ts";
 import { setupPiSearchTools } from "./pi/search-tools.ts";
 import { createPlatformClient, isPullRequestEvent } from "./platforms/index.ts";
+import { getReviewEvents, postPullRequestReview, resolvePullRequestReview } from "./review.ts";
 
 export async function run(): Promise<void> {
   const inputs = readInputs();
@@ -51,6 +52,7 @@ export async function run(): Promise<void> {
       model,
       thinking: inputs.thinking,
       excludeTools: inputs.excludeTools,
+      reviewEvents: pullRequestEvent && inputs.review ? getReviewEvents(inputs.review) : [],
       env: {
         ...mcp.env,
         ...createPiToolEnv(workspace, inputs.excludeTools, {
@@ -77,19 +79,30 @@ export async function run(): Promise<void> {
       core.info("pi did not leave repository changes to commit");
     }
 
-    if (pullRequestEvent && prComment) {
+    const review =
+      pullRequestEvent && inputs.review
+        ? resolvePullRequestReview(metadata, inputs.review, prComment, Boolean(failure))
+        : undefined;
+
+    // With the review input set, prComment becomes the review body, so it is
+    // only posted on its own when reviews are off.
+    if (pullRequestEvent && (review || prComment)) {
       const commentModel = metadata.model ?? model;
 
       if (!commentModel) {
         throw new Error("Could not determine the pi model for the pull request comment");
       }
 
-      if (inputs.comment) {
-        await platformClient.postPullRequestComment(
-          formatPiPullRequestComment(prComment, commentModel),
+      const formatBody = (body: string) => formatPiPullRequestComment(body, commentModel);
+
+      if (!inputs.comment) {
+        core.info(
+          `${skipReason(inputs.dryRun, "comment")}; skipping pi pull request ${review ? "review" : "comment"}`,
         );
+      } else if (review) {
+        await postPullRequestReview(platformClient, review, formatBody);
       } else {
-        core.info(`${skipReason(inputs.dryRun, "comment")}; skipping pi pull request comment`);
+        await platformClient.postPullRequestComment(formatBody(prComment));
       }
     }
 

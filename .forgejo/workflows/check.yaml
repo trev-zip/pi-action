@@ -67,6 +67,7 @@ jobs:
           model: claude-haiku-5-5
           exclude-tools: bash,edit,write
           push: false
+          review: request-changes
           prompt: .forgejo/prompts/review.md
 
   check:

@@ -4,10 +4,11 @@ import path from "node:path";
 import * as core from "@actions/core";
 
 import { SUBMIT_RESULT_TOOL } from "./pi/extension.ts";
-import type { ActionInputs } from "./types.ts";
+import type { ActionInputs, ReviewLevel } from "./types.ts";
 
 const DEFAULT_AUTH_SECRET = "PI_ACTION_AUTH";
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+const REVIEW_LEVELS: ReviewLevel[] = ["comment", "request-changes", "approve"];
 
 export function readInputs(): ActionInputs {
   const auth = parseOptionalString(core.getInput("auth"));
@@ -25,6 +26,7 @@ export function readInputs(): ActionInputs {
   const githubAppClientId = parseOptionalString(core.getInput("client-id"));
   const githubAppPrivateKey = parseOptionalString(core.getInput("private-key"));
   const automerge = parseOptionalBoolean(core.getInput("automerge"), "automerge");
+  const review = parseReviewLevel(core.getInput("review"));
   const dryRun = parseOptionalBoolean(core.getInput("dry-run"), "dry-run") ?? false;
   const push = parseOptionalBoolean(core.getInput("push"), "push") ?? true;
   const comment = parseOptionalBoolean(core.getInput("comment"), "comment") ?? true;
@@ -64,6 +66,7 @@ export function readInputs(): ActionInputs {
     githubAppClientId,
     githubAppPrivateKey,
     automerge,
+    review,
     push: push && !dryRun,
     comment: comment && !dryRun,
     dryRun,
@@ -123,6 +126,16 @@ export function parseThinkingLevel(value: string): string | undefined {
   }
 
   return level;
+}
+
+export function parseReviewLevel(value: string): ReviewLevel | undefined {
+  const level = parseOptionalString(value)?.toLowerCase();
+
+  if (level && !REVIEW_LEVELS.includes(level as ReviewLevel)) {
+    throw new Error(`review must be one of ${REVIEW_LEVELS.join(", ")}, or omitted`);
+  }
+
+  return level as ReviewLevel | undefined;
 }
 
 export function parseExcludeTools(value: string): string[] {
