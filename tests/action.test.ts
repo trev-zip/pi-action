@@ -72,10 +72,13 @@ import {
   buildGitHubNoreplyEmail,
   createGitHubAppJwt,
   detectPlatform,
+  ForgejoPlatformClient,
   getGitHubAppBotLogin,
   getRunContext,
   getGitHubActionsBotUser,
+  GiteaPlatformClient,
   GITHUB_APP_INSTALLATION_PERMISSIONS,
+  GitHubPlatformClient,
   isGitHubAppInstallationUserError,
   normalizePrivateKey,
 } from "../src/platforms/index.ts";
@@ -1335,23 +1338,35 @@ describe("review", () => {
     ]);
   });
 
-  test("retries rejected reviews as comment reviews without inline comments", async () => {
+  test("retries rejected reviews without inline comments before dropping the state", async () => {
     const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
-    const { client, reviews } = createReviewClient(["src/git.ts"], 1);
-
-    try {
+    const post = async (failures: number) => {
+      const { client, reviews } = createReviewClient(["src/git.ts"], failures);
       await postPullRequestReview(
         client,
         { event: "approve", body: "", comments: [comment] },
         (body) => `${body}|footer`,
       );
+      return reviews;
+    };
+    const listed = "- `src/git.ts:12`: Leaks the token.|footer";
+
+    try {
+      expect(await post(1)).toEqual([{ event: "approve", body: listed, comments: [] }]);
+      expect(await post(2)).toEqual([{ event: "comment", body: listed, comments: [] }]);
+      await expect(post(3)).rejects.toThrow(/HTTP 422/);
+
+      // Without inline comments, only dropping the state can help.
+      const { client, reviews } = createReviewClient(["src/git.ts"], 1);
+      await postPullRequestReview(
+        client,
+        { event: "request_changes", body: "Summary", comments: [] },
+        (body) => body,
+      );
+      expect(reviews).toEqual([{ event: "comment", body: "Summary", comments: [] }]);
     } finally {
       write.mockRestore();
     }
-
-    expect(reviews).toEqual([
-      { event: "comment", body: "- `src/git.ts:12`: Leaks the token.|footer", comments: [] },
-    ]);
   });
 
   test("keeps inline comments when pull request files cannot be listed", async () => {
@@ -1369,6 +1384,79 @@ describe("review", () => {
     }
 
     expect(reviews).toEqual([{ event: "comment", body: "Summary", comments: [comment] }]);
+  });
+});
+
+describe("platform reviews", () => {
+  const review: PullRequestReview = {
+    event: "approve",
+    body: "LGTM",
+    comments: [{ path: "src/git.ts", line: 12, body: "Nit." }],
+  };
+
+  test.each([
+    ["forgejo", ForgejoPlatformClient],
+    ["gitea", GiteaPlatformClient],
+  ])("posts %s reviews and pages through changed files", async (_name, Client) => {
+    const requests = await withPullRequestContext(async () => {
+      const pages = [[{ filename: "src/git.ts" }, {}], [{ filename: "README.md" }], []];
+      const { requests } = stubFetch((url) => (url.includes("/files") ? pages.shift() : {}));
+      const client = new Client("token");
+
+      expect(await client.listPullRequestFiles()).toEqual(["src/git.ts", "README.md"]);
+      await client.createPullRequestReview(review);
+      return requests;
+    });
+
+    expect(requests.map(({ method, url }) => `${method} ${url}`)).toEqual([
+      "GET https://forge.example/api/v1/repos/llc/pi-action/pulls/36/files?page=1&limit=50",
+      "GET https://forge.example/api/v1/repos/llc/pi-action/pulls/36/files?page=2&limit=50",
+      "GET https://forge.example/api/v1/repos/llc/pi-action/pulls/36/files?page=3&limit=50",
+      "POST https://forge.example/api/v1/repos/llc/pi-action/pulls/36/reviews",
+    ]);
+    expect(requests[3]?.headers.authorization).toBe("token token");
+    expect(requests[3]?.body).toEqual({
+      event: "APPROVED",
+      body: "LGTM",
+      commit_id: "7484e72",
+      comments: [{ path: "src/git.ts", body: "Nit.", new_position: 12 }],
+    });
+  });
+
+  test("posts GitHub reviews and lists changed files", async () => {
+    await withPullRequestContext(async () => {
+      const client = new GitHubPlatformClient("token");
+      // @actions/github gives octokit its own fetch, so the client's octokit
+      // methods are stubbed instead of the global fetch.
+      const { octokit } = client as unknown as {
+        octokit: ReturnType<typeof github.getOctokit>;
+      };
+      const paginate = vi
+        .spyOn(octokit, "paginate")
+        .mockResolvedValue([{ filename: "src/git.ts" }] as never);
+      const createReview = vi
+        .spyOn(octokit.rest.pulls, "createReview")
+        .mockResolvedValue({} as never);
+
+      expect(await client.listPullRequestFiles()).toEqual(["src/git.ts"]);
+      expect(paginate).toHaveBeenCalledWith(octokit.rest.pulls.listFiles, {
+        owner: "llc",
+        repo: "pi-action",
+        pull_number: 36,
+        per_page: 100,
+      });
+
+      await client.createPullRequestReview({ ...review, event: "request_changes" });
+      expect(createReview).toHaveBeenCalledWith({
+        owner: "llc",
+        repo: "pi-action",
+        pull_number: 36,
+        commit_id: "7484e72",
+        event: "REQUEST_CHANGES",
+        body: "LGTM",
+        comments: [{ path: "src/git.ts", line: 12, side: "RIGHT", body: "Nit." }],
+      });
+    });
   });
 });
 
@@ -1496,4 +1584,50 @@ function createReviewClient(files: string[] | undefined, failures = 0) {
   } as unknown as PlatformClient;
 
   return { client, reviews };
+}
+
+type RecordedRequest = {
+  method: string;
+  url: string;
+  headers: Record<string, string>;
+  body: unknown;
+};
+
+// Records requests and answers each with the JSON that respond returns.
+function stubFetch(respond: (url: string) => unknown) {
+  const requests: RecordedRequest[] = [];
+
+  vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+    const request = new Request(input, init);
+    const text = await request.text();
+
+    requests.push({
+      method: request.method,
+      url: request.url,
+      headers: Object.fromEntries(request.headers),
+      body: text ? JSON.parse(text) : undefined,
+    });
+
+    return new Response(JSON.stringify(respond(request.url)), {
+      headers: { "content-type": "application/json" },
+    });
+  });
+
+  return { requests };
+}
+
+async function withPullRequestContext<T>(run: () => Promise<T>): Promise<T> {
+  const saved = github.context.payload;
+  process.env.GITHUB_REPOSITORY = "llc/pi-action";
+  process.env.GITHUB_SERVER_URL = "https://forge.example";
+  github.context.payload = { pull_request: { number: 36, head: { sha: "7484e72" } } };
+
+  try {
+    return await run();
+  } finally {
+    vi.unstubAllGlobals();
+    github.context.payload = saved;
+    delete process.env.GITHUB_REPOSITORY;
+    delete process.env.GITHUB_SERVER_URL;
+  }
 }

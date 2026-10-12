@@ -269,10 +269,15 @@ The action posts the review, so pi still has no MCP write tools. When pi fails
 the run, an approval is posted as a comment review instead. Inline comments on
 files the pull request does not change are listed in the review body. If the
 platform rejects the review, for example because an inline comment is outside
-the diff or because the token's user opened the pull request and cannot approve
-or request changes on it, the action posts a comment review with every inline
-comment listed in the body. `comment: false` and `dry-run: true` skip the
-review.
+the diff, the action posts it again with every inline comment listed in the
+body. If that is also rejected, for example because the token's user opened the
+pull request and cannot approve or request changes on it, the action posts a
+comment review instead. `comment: false` and `dry-run: true` skip the review.
+
+The action does not dismiss earlier reviews, so a run on every push adds a
+review each time. If branch protection blocks merging on rejected reviews, an
+old request for changes keeps blocking the pull request after the problems are
+fixed until someone dismisses it.
 
 To review when someone requests a review from the token's user, trigger on
 `review_requested` and check the requested reviewer. Re-requesting the review

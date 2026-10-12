@@ -67,26 +67,39 @@ export async function postPullRequestReview(
     );
   }
 
-  try {
-    await client.createPullRequestReview({
+  const listed = formatBody(appendReviewComments(review.body, review.comments));
+  // Platforms reject comments on lines outside the diff, which moving the
+  // comments into the body fixes without changing the review state. They also
+  // reject approving or requesting changes on the token user's own pull
+  // request, which only a comment review gets past.
+  const attempts: PullRequestReview[] = [
+    {
       event: review.event,
       body: formatBody(appendReviewComments(review.body, outside)),
       comments: inline,
-    });
-    return;
-  } catch (error) {
-    // Platforms reject comments on lines outside the diff, and reviews that
-    // approve or request changes on the token user's own pull request.
-    core.warning(
-      `Could not post pi pull request review: ${errorMessage(error)}; retrying as a comment review without inline comments`,
-    );
-  }
+    },
+    ...(inline.length > 0 ? [{ event: review.event, body: listed, comments: [] }] : []),
+    ...(review.event !== "comment"
+      ? [{ event: "comment" as const, body: listed, comments: [] }]
+      : []),
+  ];
 
-  await client.createPullRequestReview({
-    event: "comment",
-    body: formatBody(appendReviewComments(review.body, review.comments)),
-    comments: [],
-  });
+  for (const [index, attempt] of attempts.entries()) {
+    const next = attempts[index + 1];
+
+    try {
+      await client.createPullRequestReview(attempt);
+      return;
+    } catch (error) {
+      if (!next) {
+        throw error;
+      }
+
+      core.warning(
+        `Could not post pi pull request review: ${errorMessage(error)}; retrying as a ${next.event} review without inline comments`,
+      );
+    }
+  }
 }
 
 async function listPullRequestFiles(client: PlatformClient): Promise<Set<string> | undefined> {
