@@ -1,0 +1,40 @@
+name: review
+
+on:
+  # CODEOWNERS requests pi's review when a pull request opens, but not after
+  # later pushes, which make pi's approval stale.
+  pull_request:
+    types: [review_requested, synchronize]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # zizmor: ignore[excessive-permissions]
+    # Forgejo reports pushes as "synchronized", so only review_requested is
+    # compared by name.
+    if: >-
+      github.event.action == 'review_requested'
+      && github.event.requested_reviewer.login == 'pi'
+      || github.event.action != 'review_requested'
+      && github.event.pull_request.user.login != 'pi'
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Review pull request
+        uses: ./. # zizmor: ignore[unpinned-uses,self-repository]
+        with:
+          token: ${{ secrets.PI_TOKEN }}
+          base-url: ${{ secrets.PI_ACTION_BASE_URL }}
+          api-key: ${{ secrets.PI_ACTION_API_KEY }}
+          model: claude-haiku-5-5
+          exclude-tools: bash,edit,write
+          push: false
+          review: approve
+          prompt: .forgejo/prompts/review.md

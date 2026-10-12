@@ -313,6 +313,27 @@ jobs:
           prompt: Review this pull request. Request changes if you find any problems.
 ```
 
+To request pi's review on every pull request, add a `CODEOWNERS` file that
+names the token's user, such as `.* @pi-bot` in `.forgejo/CODEOWNERS` (Forgejo
+and Gitea patterns are regular expressions). Forgejo only requests code owner
+reviews when a pull request opens, so also trigger on `synchronize` to review
+later pushes. Forgejo reports those pushes as `synchronized`, so compare only
+`review_requested` by name:
+
+```yaml
+on:
+  pull_request:
+    types: [review_requested, synchronize]
+
+jobs:
+  review:
+    if: >-
+      github.event.action == 'review_requested'
+      && github.event.requested_reviewer.login == 'pi-bot'
+      || github.event.action != 'review_requested'
+      && github.event.pull_request.user.login != 'pi-bot'
+```
+
 Allow `approve` only when an approval from pi should carry weight. A prompt
 injection in the pull request could talk pi into approving it, and the approval
 counts toward required approvals if branch protection accepts reviews from the

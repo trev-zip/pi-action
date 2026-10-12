@@ -1,0 +1,2 @@
+# Patterns are regular expressions matched against the whole path.
+.* @pi

@@ -48,28 +48,6 @@ jobs:
             fi
           fi
 
-  review:
-    # zizmor: ignore[excessive-permissions]
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-26.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Review pull request
-        uses: ./. # zizmor: ignore[unpinned-uses,self-repository]
-        with:
-          token: ${{ secrets.PI_TOKEN }}
-          base-url: ${{ secrets.PI_ACTION_BASE_URL }}
-          api-key: ${{ secrets.PI_ACTION_API_KEY }}
-          model: claude-haiku-5-5
-          exclude-tools: bash,edit,write
-          push: false
-          review: request-changes
-          prompt: .forgejo/prompts/review.md
-
   check:
     # zizmor: ignore[excessive-permissions]
     runs-on: ubuntu-26.04
