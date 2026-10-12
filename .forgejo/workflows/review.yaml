@@ -1,13 +1,22 @@
 name: review
 
-on:
-  # CODEOWNERS requests pi's review when a pull request opens, but not after
-  # later pushes, which make pi's approval stale.
-  pull_request:
+# pull_request_target runs this workflow, the action, and the review prompt
+# from the base branch, so a pull request cannot change how it is reviewed.
+# The pull request is checked out only for pi to read; nothing from it runs.
+on: # zizmor: ignore[dangerous-triggers]
+  # CODEOWNERS requests pi's review when a pull request opens or leaves WIP,
+  # but not after later pushes, which make pi's approval stale.
+  pull_request_target:
     types: [review_requested, synchronize]
 
+# Concurrency applies to every run, including ones whose job is skipped, so
+# review requests for other reviewers get a group of their own instead of
+# cancelling pi's review.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref }}
+  group: >-
+    ${{ github.workflow }}-${{ github.event.pull_request.number }}-${{
+    (github.event.action != 'review_requested' || github.event.requested_reviewer.login == 'pi')
+    && 'pi' || format('requested-{0}', github.event.requested_reviewer.login) }}
   cancel-in-progress: true
 
 jobs:
@@ -22,13 +31,26 @@ jobs:
       && github.event.pull_request.user.login != 'pi'
     runs-on: ubuntu-26.04
     steps:
-      - name: Checkout
+      # pi reads the pull request's files but runs no shell, so nothing from
+      # the pull request is executed.
+      - name: Checkout pull request
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/head
           persist-credentials: false
 
+      - name: Checkout base branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: base
+          persist-credentials: false
+
+      # The action commits whatever pi leaves in the workspace.
+      - name: Exclude base branch checkout
+        run: echo /base/ >> .git/info/exclude
+
       - name: Review pull request
-        uses: ./. # zizmor: ignore[unpinned-uses,self-repository]
+        uses: ./base # zizmor: ignore[unpinned-uses,self-repository]
         with:
           token: ${{ secrets.PI_TOKEN }}
           base-url: ${{ secrets.PI_ACTION_BASE_URL }}
@@ -37,4 +59,4 @@ jobs:
           exclude-tools: bash,edit,write
           push: false
           review: approve
-          prompt: .forgejo/prompts/review.md
+          prompt: base/.forgejo/prompts/review.md

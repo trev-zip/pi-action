@@ -316,8 +316,8 @@ jobs:
 To request pi's review on every pull request, add a `CODEOWNERS` file that
 names the token's user, such as `.* @pi-bot` in `.forgejo/CODEOWNERS` (Forgejo
 and Gitea patterns are regular expressions). Forgejo only requests code owner
-reviews when a pull request opens, so also trigger on `synchronize` to review
-later pushes. Forgejo reports those pushes as `synchronized`, so compare only
+reviews when a pull request opens or leaves WIP, so also trigger on
+`synchronize` to review later pushes. Forgejo reports those pushes as `synchronized`, so compare only
 `review_requested` by name:
 
 ```yaml

@@ -2,6 +2,7 @@ Review this pull request.
 
 ## Gathering context
 
+- The pull request's version of the repository is checked out at the workspace root. `base/` holds the base branch; use it only to compare against, and never report paths under `base/`.
 - Use the platform MCP tools to read the pull request title, description, existing comments, and diff.
 - Use `grep`, `find`, and `ls` to locate code, and `read` to read the changed files and the code around them.
 - Follow the requirements in `AGENTS.md` and `CONTRIBUTING.md`.
