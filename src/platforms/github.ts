@@ -39,7 +39,7 @@ const GITHUB_REVIEW_STATES: Record<string, SubmittedReview["state"]> = {
   DISMISSED: "dismissed",
 };
 
-const GITHUB_MCP_VERSION = "2.0.2";
+const GITHUB_MCP_VERSION = "2.0.3";
 const GITHUB_MCP_TOOLSETS = "repos,issues,pull_requests,actions";
 
 type GitHubAppInstallationAuthentication = {
