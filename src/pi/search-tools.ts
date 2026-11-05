@@ -8,7 +8,7 @@ import { errorMessage } from "../utils.ts";
 import { getPiTarget } from "./binary.ts";
 
 export const RIPGREP_VERSION = "15.2.0";
-export const FD_VERSION = "10.5.0";
+export const FD_VERSION = "10.5.1";
 
 type SearchTool = {
   name: "rg" | "fd";
