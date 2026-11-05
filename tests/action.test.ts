@@ -49,11 +49,13 @@ import {
 import {
   buildPiModelsConfig,
   createPiProviderEnv,
-  discoverPiModelLimits,
+  discoverPiModel,
+  getApiForModelOwner,
   getModelListUrl,
   getPiModelSelection,
   getProviderBaseUrl,
-  parseModelLimits,
+  parseModelInfo,
+  parseModelsConfig,
   PI_API_KEY_ENV,
   setupPiModels,
   setupPiSettings,
@@ -457,26 +459,38 @@ describe("pi models", () => {
     expect(() => buildPiModelsConfig(baseInputs, '{"providers":{"a":1}}')).toThrow(/a/);
   });
 
-  test("reads model limits from Anthropic and OpenRouter-style model lists", () => {
+  test("reads model owners and limits from Anthropic and OpenRouter-style model lists", () => {
     expect(
-      parseModelLimits(
+      parseModelInfo(
         {
           data: [
             { id: "other", max_input_tokens: 1, max_tokens: 1 },
-            { id: "claude-haiku-5-5", max_input_tokens: 1000000, max_tokens: 128000 },
+            {
+              id: "claude-haiku-5-5",
+              owned_by: "anthropic",
+              max_input_tokens: 1000000,
+              max_tokens: 128000,
+            },
           ],
         },
         "claude-haiku-5-5",
       ),
-    ).toEqual({ contextWindow: 1000000, maxTokens: 128000 });
+    ).toEqual({ ownedBy: "anthropic", contextWindow: 1000000, maxTokens: 128000 });
     expect(
-      parseModelLimits(
+      parseModelInfo(
         { data: [{ id: "gpt-6-luna", context_length: 400000, max_completion_tokens: 0 }] },
         "gpt-6-luna",
       ),
-    ).toEqual({ contextWindow: 400000, maxTokens: undefined });
-    expect(parseModelLimits({ data: [{ id: "other" }] }, "gpt-6-luna")).toEqual({});
-    expect(parseModelLimits([], "gpt-6-luna")).toEqual({});
+    ).toEqual({ ownedBy: undefined, contextWindow: 400000, maxTokens: undefined });
+    expect(parseModelInfo({ data: [{ id: "other" }] }, "gpt-6-luna")).toEqual({});
+    expect(parseModelInfo([], "gpt-6-luna")).toEqual({});
+  });
+
+  test("picks anthropic-messages only for Anthropic-owned models", () => {
+    expect(getApiForModelOwner("anthropic")).toBe("anthropic-messages");
+    expect(getApiForModelOwner("openai")).toBeUndefined();
+    expect(getApiForModelOwner("library")).toBeUndefined();
+    expect(getApiForModelOwner(undefined)).toBeUndefined();
   });
 
   test("drops /v1 from Anthropic base URLs, which Anthropic clients add themselves", () => {
@@ -523,9 +537,85 @@ describe("pi models", () => {
         baseUrl: "http://localhost:8317/v1",
         api: "anthropic-messages",
       };
-      await discoverPiModelLimits(buildPiModelsConfig(inputs), inputs);
+      await discoverPiModel(inputs, parseModelsConfig(undefined));
 
       expect(fetch.mock.calls[0]?.[0]).toBe("http://localhost:8317/v1/models");
+    } finally {
+      write.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  test("detects anthropic-messages for Anthropic-owned base-url models", async () => {
+    const fetch = vi.fn(async (_url: string, _init?: RequestInit) =>
+      Response.json({
+        data: [
+          {
+            id: "claude-haiku-5-5",
+            owned_by: "anthropic",
+            max_input_tokens: 1000000,
+            max_tokens: 128000,
+          },
+          { id: "gpt-6-luna", owned_by: "openai" },
+        ],
+      }),
+    );
+    vi.stubGlobal("fetch", fetch);
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    try {
+      const inputs = {
+        ...baseInputs,
+        model: "claude-haiku-5-5",
+        baseUrl: "http://localhost:8317/v1",
+      };
+      const discovered = await discoverPiModel(inputs, parseModelsConfig(undefined));
+
+      expect(discovered).toEqual({
+        api: "anthropic-messages",
+        contextWindow: 1000000,
+        maxTokens: 128000,
+      });
+      expect(fetch.mock.calls[0]?.[0]).toBe("http://localhost:8317/v1/models");
+      expect(buildPiModelsConfig(inputs, undefined, discovered).providers.custom).toEqual({
+        baseUrl: "http://localhost:8317",
+        api: "anthropic-messages",
+        models: [
+          { id: "claude-haiku-5-5", reasoning: false, contextWindow: 1000000, maxTokens: 128000 },
+        ],
+      });
+
+      // The model list is still read for the API when the models input sets
+      // every limit.
+      const complete = JSON.stringify({
+        providers: {
+          custom: { models: [{ id: "claude-haiku-5-5", contextWindow: 200000, maxTokens: 32000 }] },
+        },
+      });
+      expect(await discoverPiModel(inputs, parseModelsConfig(complete))).toEqual({
+        api: "anthropic-messages",
+      });
+
+      // Other owners keep openai-completions.
+      const gpt = { ...inputs, model: "gpt-6-luna" };
+      const gptDiscovered = await discoverPiModel(gpt, parseModelsConfig(undefined));
+      expect(gptDiscovered).toEqual({});
+      expect(buildPiModelsConfig(gpt, undefined, gptDiscovered).providers.custom).toMatchObject({
+        baseUrl: "http://localhost:8317/v1",
+        api: "openai-completions",
+      });
+
+      // An api input or a models input API takes precedence over detection.
+      for (const [explicit, models] of [
+        [{ ...inputs, api: "openai-responses" }, undefined],
+        [inputs, JSON.stringify({ providers: { custom: { api: "openai-responses" } } })],
+      ] as const) {
+        const result = await discoverPiModel(explicit, parseModelsConfig(models));
+        expect(result.api).toBeUndefined();
+        expect(buildPiModelsConfig(explicit, models, result).providers.custom?.api).toBe(
+          "openai-responses",
+        );
+      }
     } finally {
       write.mockRestore();
       vi.unstubAllGlobals();
@@ -539,6 +629,7 @@ describe("pi models", () => {
       }),
     );
     vi.stubGlobal("fetch", fetch);
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 
     try {
       const inputs = {
@@ -547,10 +638,9 @@ describe("pi models", () => {
         baseUrl: "http://localhost:8317/v1",
         apiKey: "secret",
       };
-      const config = buildPiModelsConfig(inputs);
-      await discoverPiModelLimits(config, inputs);
+      const discovered = await discoverPiModel(inputs, parseModelsConfig(undefined));
 
-      expect(config.providers.custom?.models).toEqual([
+      expect(buildPiModelsConfig(inputs, undefined, discovered).providers.custom?.models).toEqual([
         { id: "claude-haiku-5-5", reasoning: false, contextWindow: 1000000, maxTokens: 128000 },
       ]);
       expect(fetch.mock.calls[0]?.[0]).toBe("http://localhost:8317/v1/models");
@@ -564,36 +654,35 @@ describe("pi models", () => {
       const models = JSON.stringify({
         providers: { custom: { models: [{ id: "claude-haiku-5-5", maxTokens: 32000 }] } },
       });
-      const partial = buildPiModelsConfig(inputs, models);
-      await discoverPiModelLimits(partial, inputs);
+      const partial = await discoverPiModel(inputs, parseModelsConfig(models));
 
-      expect(partial.providers.custom?.models).toEqual([
+      expect(buildPiModelsConfig(inputs, models, partial).providers.custom?.models).toEqual([
         { id: "claude-haiku-5-5", maxTokens: 32000, contextWindow: 1000000 },
       ]);
 
       fetch.mockClear();
       const complete = JSON.stringify({
         providers: {
-          custom: { models: [{ id: "claude-haiku-5-5", contextWindow: 200000, maxTokens: 32000 }] },
+          custom: {
+            api: "openai-completions",
+            models: [{ id: "claude-haiku-5-5", contextWindow: 200000, maxTokens: 32000 }],
+          },
         },
       });
-      await discoverPiModelLimits(buildPiModelsConfig(inputs, complete), inputs);
-      await discoverPiModelLimits(
-        buildPiModelsConfig({ ...baseInputs, provider: "anthropic", apiKey: "secret" }),
-        {
-          ...baseInputs,
-          provider: "anthropic",
-          apiKey: "secret",
-        },
+      await discoverPiModel(inputs, parseModelsConfig(complete));
+      await discoverPiModel(
+        { ...baseInputs, provider: "anthropic", apiKey: "secret" },
+        parseModelsConfig(undefined),
       );
 
       expect(fetch).not.toHaveBeenCalled();
     } finally {
+      write.mockRestore();
       vi.unstubAllGlobals();
     }
   });
 
-  test("keeps pi defaults when the endpoint has no model limits", async () => {
+  test("keeps pi defaults when the endpoint has no model information", async () => {
     const inputs = { ...baseInputs, model: "gpt-6-luna", baseUrl: "http://localhost:8317/v1" };
 
     for (const response of [
@@ -604,13 +693,19 @@ describe("pi models", () => {
       },
     ]) {
       vi.stubGlobal("fetch", vi.fn(response));
+      const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 
       try {
-        const config = buildPiModelsConfig(inputs);
-        await discoverPiModelLimits(config, inputs);
+        const discovered = await discoverPiModel(inputs, parseModelsConfig(undefined));
 
-        expect(config.providers.custom?.models).toEqual([{ id: "gpt-6-luna", reasoning: false }]);
+        expect(discovered).toEqual({});
+        expect(buildPiModelsConfig(inputs, undefined, discovered).providers.custom).toEqual({
+          baseUrl: "http://localhost:8317/v1",
+          api: "openai-completions",
+          models: [{ id: "gpt-6-luna", reasoning: false }],
+        });
       } finally {
+        write.mockRestore();
         vi.unstubAllGlobals();
       }
     }

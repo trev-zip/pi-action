@@ -15,9 +15,11 @@ endpoint such as [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
 
 Point `base-url` at any compatible endpoint. The action adds it to pi's
 `models.json` as a `custom` provider (rename it with `provider`) and selects
-`model` on it. `api` defaults to `openai-completions`; use `openai-responses`,
-`anthropic-messages`, or `google-generative-ai` when the endpoint speaks another
-API.
+`model` on it. Without `api`, the action picks `anthropic-messages` when the
+endpoint's model list says Anthropic owns the model, as CLIProxyAPI does for
+Claude models, and `openai-completions` otherwise. Set `api` to
+`openai-completions`, `openai-responses`, `anthropic-messages`, or
+`google-generative-ai` to choose the API yourself.
 
 ```yaml
 name: pi
@@ -48,11 +50,13 @@ jobs:
 The API key only reaches pi through an environment variable; `models.json`
 references it as `$PI_ACTION_API_KEY` so the key is never written to disk.
 
-With `api: anthropic-messages`, the action drops a trailing `/v1` from
-`base-url`, since Anthropic clients add it themselves, so the same CLIProxyAPI
-URL works with either API. For Claude models, prefer `anthropic-messages`: pi
-marks requests for prompt caching there, but not over `openai-completions` by
-default.
+With `anthropic-messages`, the action drops a trailing `/v1` from `base-url`,
+since Anthropic clients add it themselves, so the same CLIProxyAPI URL works
+with either API. Claude models should use `anthropic-messages`: pi marks
+requests for prompt caching there, but not over `openai-completions` by
+default. Other owners keep `openai-completions`, since servers other than
+CLIProxyAPI often report every model as owned by `openai` without serving
+`openai-responses`.
 
 The action reads the model's context window and output limit from the
 endpoint's model list, which CLIProxyAPI provides, and passes them to pi.
@@ -388,7 +392,7 @@ those tools run, cached like the pi and MCP binaries.
 | `provider`            | pi provider name, or the name for the `base-url` provider (default `custom`)                                          |
 | `model`               | Model ID; required with `base-url` or `provider`                                                                      |
 | `base-url`            | OpenAI-, Anthropic-, or Google-compatible endpoint, such as a CLIProxyAPI `/v1`; `anthropic-messages` drops the `/v1` |
-| `api`                 | API type for `base-url` (default `openai-completions`)                                                                |
+| `api`                 | API type for `base-url` (default `anthropic-messages` for Anthropic-owned models, otherwise `openai-completions`)     |
 | `api-key`             | API key for `base-url` or `provider`                                                                                  |
 | `models`              | pi `models.json` content, or a path to one                                                                            |
 | `thinking`            | Thinking level                                                                                                        |

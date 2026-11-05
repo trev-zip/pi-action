@@ -19,7 +19,7 @@ inputs:
     description: OpenAI- or Anthropic-compatible endpoint, such as a CLIProxyAPI server's /v1 URL
     required: false
   api:
-    description: API type for base-url, such as openai-completions, openai-responses, or anthropic-messages (default openai-completions)
+    description: API type for base-url, such as openai-completions, openai-responses, or anthropic-messages (default anthropic-messages when the endpoint's model list says Anthropic owns the model, otherwise openai-completions)
     required: false
   api-key:
     description: API key for base-url or provider

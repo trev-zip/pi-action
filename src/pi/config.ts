@@ -31,14 +31,25 @@ export type PiModelLimits = {
   maxTokens?: number;
 };
 
+export type PiModelInfo = PiModelLimits & {
+  ownedBy?: string;
+};
+
+// What the endpoint's model list adds to the base-url model: the API, when
+// neither the api input nor the models input sets one, and the limits the
+// models input leaves unset.
+export type PiDiscoveredModel = PiModelLimits & {
+  api?: string;
+};
+
 export async function setupPiModels(
   agentDir: string,
   inputs: ProviderInputs,
   workspace: string,
 ): Promise<PiModelSelection> {
   const models = inputs.models ? resolveFileInput(inputs.models, workspace) : undefined;
-  const config = buildPiModelsConfig(inputs, models);
-  await discoverPiModelLimits(config, inputs);
+  const discovered = await discoverPiModel(inputs, parseModelsConfig(models));
+  const config = buildPiModelsConfig(inputs, models, discovered);
 
   if (Object.keys(config.providers).length > 0) {
     const modelsPath = path.join(agentDir, "models.json");
@@ -68,7 +79,11 @@ export function setupPiSettings(agentDir: string, excludeTools: string[]): boole
   return true;
 }
 
-export function buildPiModelsConfig(inputs: ProviderInputs, models?: string): ModelsConfig {
+export function buildPiModelsConfig(
+  inputs: ProviderInputs,
+  models?: string,
+  discovered: PiDiscoveredModel = {},
+): ModelsConfig {
   const config = parseModelsConfig(models);
 
   if (inputs.baseUrl) {
@@ -80,16 +95,27 @@ export function buildPiModelsConfig(inputs: ProviderInputs, models?: string): Mo
     const providerName = inputs.provider ?? DEFAULT_CUSTOM_PROVIDER;
     const existing = config.providers[providerName] ?? {};
     const existingModels = Array.isArray(existing.models) ? (existing.models as unknown[]) : [];
+    const limits: PiModelLimits = {
+      ...(discovered.contextWindow ? { contextWindow: discovered.contextWindow } : {}),
+      ...(discovered.maxTokens ? { maxTokens: discovered.maxTokens } : {}),
+    };
     // Keep a definition from the models input, which may carry context
-    // window, cost, or input metadata the action cannot infer.
+    // window, cost, or input metadata the action cannot infer. Discovered
+    // limits only hold the ones it leaves unset.
     const models = existingModels.some((model) => isModelWithId(model, modelId))
-      ? existingModels
+      ? existingModels.map((model) =>
+          isModelWithId(model, modelId) ? { ...(model as object), ...limits } : model,
+        )
       : [
           ...existingModels,
-          { id: modelId, reasoning: inputs.thinking !== undefined && inputs.thinking !== "off" },
+          {
+            id: modelId,
+            reasoning: inputs.thinking !== undefined && inputs.thinking !== "off",
+            ...limits,
+          },
         ];
 
-    const api = inputs.api ?? (asString(existing.api) || DEFAULT_CUSTOM_API);
+    const api = inputs.api ?? (asString(existing.api) || discovered.api || DEFAULT_CUSTOM_API);
 
     config.providers[providerName] = {
       ...existing,
@@ -112,62 +138,94 @@ export function buildPiModelsConfig(inputs: ProviderInputs, models?: string): Mo
   return config;
 }
 
+// Reads the base-url model from the endpoint's model list.
+//
 // pi gives a model without limits a 128000-token context window and a
 // 16384-token output limit, which cuts off long turns of models that support
-// more. Fill in the limits the models input leaves unset from the endpoint's
-// model list. CLIProxyAPI only includes limits in the Anthropic format of that
-// list, so the request asks for it.
-export async function discoverPiModelLimits(
-  config: ModelsConfig,
+// more, so fill in the limits the models input leaves unset. CLIProxyAPI only
+// includes limits in the Anthropic format of that list, so the request asks
+// for it.
+//
+// Without an api input or a models input API, also pick the API from the
+// model's owner, so Claude models get pi's prompt caching over
+// anthropic-messages without configuration.
+export async function discoverPiModel(
   inputs: ProviderInputs,
-): Promise<void> {
+  models: ModelsConfig,
+): Promise<PiDiscoveredModel> {
   if (!inputs.baseUrl || !inputs.model) {
-    return;
+    return {};
   }
 
   const modelId = inputs.model;
-  const provider = config.providers[inputs.provider ?? DEFAULT_CUSTOM_PROVIDER];
-  const definition = Array.isArray(provider?.models)
+  const provider = models.providers[inputs.provider ?? DEFAULT_CUSTOM_PROVIDER];
+  const configuredApi = inputs.api ?? (asString(provider?.api) || undefined);
+  const found = Array.isArray(provider?.models)
     ? (provider.models as unknown[]).find((model) => isModelWithId(model, modelId))
     : undefined;
+  const definition = isRecord(found) ? found : {};
 
-  if (!isRecord(definition) || (definition.contextWindow && definition.maxTokens)) {
-    return;
+  if (configuredApi && definition.contextWindow && definition.maxTokens) {
+    return {};
   }
 
-  const url = getModelListUrl(asString(provider?.baseUrl), asString(provider?.api));
-  let limits: PiModelLimits;
+  const listApi = configuredApi ?? DEFAULT_CUSTOM_API;
+  const url = getModelListUrl(getProviderBaseUrl(inputs.baseUrl, listApi), listApi);
+  let info: PiModelInfo;
 
   try {
-    limits = await fetchModelLimits(url, modelId, inputs.apiKey);
+    info = await fetchModelInfo(url, modelId, inputs.apiKey);
   } catch (error) {
+    const defaults = [
+      ...(definition.contextWindow && definition.maxTokens ? [] : ["its default limits"]),
+      ...(configuredApi ? [] : [DEFAULT_CUSTOM_API]),
+    ];
     core.info(
-      `Could not read limits for ${modelId} from ${url}; pi will use its defaults: ${error instanceof Error ? error.message : String(error)}`,
+      `Could not read ${modelId} from ${url}; pi will use ${defaults.join(" and ")}: ${error instanceof Error ? error.message : String(error)}`,
     );
-    return;
+    return {};
   }
 
-  const discovered: PiModelLimits = {};
+  const discovered: PiDiscoveredModel = {};
 
-  if (!definition.contextWindow && limits.contextWindow) {
-    discovered.contextWindow = limits.contextWindow;
+  if (!configuredApi) {
+    const api = getApiForModelOwner(info.ownedBy);
+
+    if (api) {
+      discovered.api = api;
+      core.info(`Detected ${api} for ${modelId}, which is owned by ${info.ownedBy}`);
+    } else {
+      core.info(`Using ${DEFAULT_CUSTOM_API} for ${modelId}; set api to use another API`);
+    }
   }
 
-  if (!definition.maxTokens && limits.maxTokens) {
-    discovered.maxTokens = limits.maxTokens;
+  if (!definition.contextWindow && info.contextWindow) {
+    discovered.contextWindow = info.contextWindow;
   }
 
-  if (Object.keys(discovered).length === 0) {
+  if (!definition.maxTokens && info.maxTokens) {
+    discovered.maxTokens = info.maxTokens;
+  }
+
+  const limits = Object.entries(discovered).filter(([name]) => name !== "api");
+
+  if (limits.length > 0) {
+    core.info(
+      `Discovered limits for ${modelId}: ${limits.map(([name, value]) => `${name} ${value}`).join(", ")}`,
+    );
+  } else if (!definition.contextWindow || !definition.maxTokens) {
     core.info(`${url} has no limits for ${modelId}; pi will use its defaults`);
-    return;
   }
 
-  Object.assign(definition, discovered);
-  core.info(
-    `Discovered limits for ${modelId}: ${Object.entries(discovered)
-      .map(([name, value]) => `${name} ${value}`)
-      .join(", ")}`,
-  );
+  return discovered;
+}
+
+// CLIProxyAPI reports the provider behind each model as owned_by. Only
+// Anthropic is trusted: other servers fill owned_by loosely, such as "openai"
+// for every model, and may not serve /responses, so they keep
+// openai-completions.
+export function getApiForModelOwner(ownedBy: string | undefined): string | undefined {
+  return ownedBy === "anthropic" ? "anthropic-messages" : undefined;
 }
 
 // Anthropic clients add /v1 to the base URL themselves, so an OpenAI-style
@@ -184,11 +242,11 @@ export function getModelListUrl(baseUrl: string, api: string): string {
   return api === "anthropic-messages" ? `${base}/v1/models` : `${base}/models`;
 }
 
-export async function fetchModelLimits(
+export async function fetchModelInfo(
   url: string,
   modelId: string,
   apiKey: string | undefined,
-): Promise<PiModelLimits> {
+): Promise<PiModelInfo> {
   const response = await fetch(url, {
     headers: {
       "anthropic-version": "2023-06-01",
@@ -203,12 +261,13 @@ export async function fetchModelLimits(
     throw new Error(`HTTP ${response.status}`);
   }
 
-  return parseModelLimits(await response.json(), modelId);
+  return parseModelInfo(await response.json(), modelId);
 }
 
-// Reads the Anthropic (max_input_tokens, max_tokens) and OpenRouter-style
-// (context_length, max_completion_tokens) fields of a model list.
-export function parseModelLimits(body: unknown, modelId: string): PiModelLimits {
+// Reads the owner and the Anthropic (max_input_tokens, max_tokens) and
+// OpenRouter-style (context_length, max_completion_tokens) limits of a model
+// list entry.
+export function parseModelInfo(body: unknown, modelId: string): PiModelInfo {
   const list = isRecord(body) && Array.isArray(body.data) ? (body.data as unknown[]) : [];
   const model = list.find((entry) => isModelWithId(entry, modelId));
 
@@ -217,6 +276,7 @@ export function parseModelLimits(body: unknown, modelId: string): PiModelLimits 
   }
 
   return {
+    ownedBy: asString(model.owned_by) || undefined,
     contextWindow: asPositiveInteger(model.max_input_tokens ?? model.context_length),
     maxTokens: asPositiveInteger(model.max_tokens ?? model.max_completion_tokens),
   };
@@ -234,7 +294,7 @@ export function createPiProviderEnv(apiKey: string | undefined): Record<string, 
   return apiKey ? { [PI_API_KEY_ENV]: apiKey } : {};
 }
 
-function parseModelsConfig(models: string | undefined): ModelsConfig {
+export function parseModelsConfig(models: string | undefined): ModelsConfig {
   if (!models?.trim()) {
     return { providers: {} };
   }
