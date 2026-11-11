@@ -5,7 +5,7 @@ import {
   type ToolArchiveExecutableSpec,
 } from "../tool-archive.ts";
 
-export const PI_VERSION = "1.5.1";
+export const PI_VERSION = "1.5.2";
 
 export async function resolvePiExecutable(): Promise<string> {
   if (process.env.PI_PATH) {
