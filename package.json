@@ -25,7 +25,7 @@
     "libsodium-wrappers": "^0.8.4"
   },
   "devDependencies": {
-    "@tsconfig/node-ts": "^23.6.4",
+    "@tsconfig/node-ts": "^23.6.5",
     "@tsconfig/node24": "^24.0.5",
     "@types/node": "^24.19.2",
     "typescript": "^7.0.2",
