@@ -21,7 +21,7 @@ jobs:
     steps:
       - id: init
         name: Initialize
-        uses: spotdemo4/nix-init@b66e42aabfd321ffd40584fb31adbfc3ea9c8f11 # v1.77.0
+        uses: spotdemo4/nix-init@f3e848ee8e4677a689acea618a0342fa87769e53 # v1.79.0
         with:
           github_token: ${{ secrets.GH_TOKEN }}
           niks3_url: https://niks3.trev.zip
