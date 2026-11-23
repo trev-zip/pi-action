@@ -7,7 +7,7 @@ import { resolveCachedExecutable, type ToolArchiveAsset } from "../tool-archive.
 import { errorMessage } from "../utils.ts";
 import { getPiTarget } from "./binary.ts";
 
-export const RIPGREP_VERSION = "15.2.0";
+export const RIPGREP_VERSION = "16.0.0";
 export const FD_VERSION = "10.5.2";
 
 type SearchTool = {
